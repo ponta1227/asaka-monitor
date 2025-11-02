@@ -2,7 +2,7 @@ name: asaka-monitor
 
 on:
   schedule:
-    - cron: "*/30 * * * *"  # 30分ごと（UTC基準）
+    - cron: "*/30 * * * *"  # 30分ごと
   workflow_dispatch:
 
 jobs:
@@ -15,7 +15,7 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install Python deps
+      - name: Install dependencies
         run: |
           python -m pip install -r requirements.txt
           python -m playwright install --with-deps
@@ -26,10 +26,11 @@ jobs:
           LINE_TO_USER_ID: ${{ secrets.LINE_TO_USER_ID }}
         run: python monitor.py
 
+      # 👇これを追加（Artifactsアップロード）
       - name: Upload debug artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: page-dumps
           path: artifact/
-          if-no-files-found: ignore
+          if-no-files-found: warn
