@@ -1,4 +1,4 @@
-# monitor.py（方法②：常に動作状況を1行送る版）
+# monitor.py（改良版：DOMスキャン + 常時通知付き）
 import os
 import datetime as dt
 import requests
@@ -35,7 +35,7 @@ def send_line(text: str):
 def navigate_to_subfacility(page, sub_name: str):
     """
     対象サブ施設（メイン/サブアリーナ）の空き画面へ移動。
-    うまく動かない場合は以下で操作を録画し、出力されたセレクタでこの関数を書き換えてください：
+    うまく動かない場合は、以下で操作を録画して置き換えてください：
         python -m playwright codegen https://www.pf-yoyaku.com/User/asaka/Home
     """
     page.goto(HOME_URL, timeout=60000)
@@ -44,6 +44,7 @@ def navigate_to_subfacility(page, sub_name: str):
     page.get_by_text("全施設").first.click()
     page.get_by_text("総合体育館（４月１日～）").first.click()
     page.get_by_text(sub_name).first.click()
+
     for key in ["空き状況", "空き照会", "カレンダー", "月表示", "週表示"]:
         loc = page.get_by_text(key)
         if loc.count() > 0:
@@ -52,26 +53,52 @@ def navigate_to_subfacility(page, sub_name: str):
                 break
             except Exception:
                 pass
+
     page.wait_for_load_state("domcontentloaded")
 
 def scan_current_page_for_matches(page, today: dt.date):
     """
-    MVPの文字列ベース検出：
-    - 平日：夜間 / 週末・祝日：午前・午後・夜間・全時間帯
-    - ページに「空き」または「○」があり、かつ上記ターゲット語が含まれていれば検知とみなす
-    ※ DOM構造に依存しない簡易版。精密抽出は後日強化。
+    ページ内テーブル構造から直接「○」や「空き」を検出する改良版。
+    目視では○があるのに判定されない場合に対応する。
     """
-    html = page.content()
-    def contains_any(s, words): return any(w in s for w in words)
 
+    matches = []
+
+    # 対象時間帯を決定
     if is_weekend_or_holiday(today):
         wanted = ["午前", "午後", "夜間", "全時間帯"]
     else:
         wanted = ["夜間"]
 
-    if ("空き" in html or "○" in html) and contains_any(html, wanted):
-        return [{"date": "本日以降", "slot": ",".join(wanted)}]
-    return []
+    try:
+        # テーブルセル(tdタグ)をすべて取得
+        cells = page.locator("td")
+        count = cells.count()
+
+        for i in range(count):
+            try:
+                text = cells.nth(i).inner_text().strip()
+
+                # 「○」または「空き」が書かれているセルを検出
+                if text in ["○", "空き"]:
+                    # 同じ行(<tr>)を取得して時間帯情報を確認
+                    row = cells.nth(i).locator("xpath=ancestor::tr[1]")
+                    row_text = row.inner_text()
+
+                    # 該当行に「夜間」「午前」などの語が含まれているか
+                    if any(w in row_text for w in wanted):
+                        matches.append({
+                            "date": "本日以降",
+                            "slot": ",".join([w for w in wanted if w in row_text]) or ",".join(wanted),
+                        })
+
+            except Exception as inner_err:
+                print(f"[WARN] cell {i} parse failed: {inner_err}")
+
+    except Exception as e:
+        print(f"[ERROR] failed to scan table: {e}")
+
+    return matches
 
 def now_jst_str(fmt="%Y-%m-%d %H:%M"):
     """JSTの現在時刻を文字列で返す（GitHub ActionsはUTC動作のため）"""
@@ -104,7 +131,7 @@ def main():
             lines.append(f"・{sub} / {date} / 対象帯: {slot}\n{url}")
         send_line("\n".join(lines))
     else:
-        # ← 方法②：空きが無くても“必ず”稼働メッセージを送信
+        # ← 常時通知モード：空きが無くても“稼働中”メッセージを送信
         send_line(f"ℹ️ 稼働中（空きなし）: {now_jst_str()} JST")
 
 if __name__ == "__main__":
