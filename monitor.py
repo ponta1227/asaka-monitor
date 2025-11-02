@@ -1,4 +1,4 @@
-# monitor.py（改良版：DOMスキャン + 常時通知付き）
+# monitor.py（DOMスキャン改良版：○/△/空き を検出＋常時通知）
 import os
 import datetime as dt
 import requests
@@ -8,7 +8,7 @@ import jpholiday
 
 HOME_URL = "https://www.pf-yoyaku.com/User/asaka/Home"
 
-# --- LINE設定 ---
+# --- LINE 設定 ---
 load_dotenv()
 LINE_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
 LINE_TO = os.getenv("LINE_TO_USER_ID")
@@ -35,7 +35,7 @@ def send_line(text: str):
 def navigate_to_subfacility(page, sub_name: str):
     """
     対象サブ施設（メイン/サブアリーナ）の空き画面へ移動。
-    うまく動かない場合は、以下で操作を録画して置き換えてください：
+    うまく動かない場合は、以下で操作を録画してセレクタを置き換えてください：
         python -m playwright codegen https://www.pf-yoyaku.com/User/asaka/Home
     """
     page.goto(HOME_URL, timeout=60000)
@@ -58,20 +58,19 @@ def navigate_to_subfacility(page, sub_name: str):
 
 def scan_current_page_for_matches(page, today: dt.date):
     """
-    ページ内テーブル構造から直接「○」や「空き」を検出する改良版。
-    目視では○があるのに判定されない場合に対応する。
+    ページ内テーブル構造から「○」「△」「空き」を直接検出する改良版。
+    - 平日：夜間のみ
+    - 土日祝：午前・午後・夜間・全時間帯
     """
-
     matches = []
 
-    # 対象時間帯を決定
+    # 対象時間帯
     if is_weekend_or_holiday(today):
         wanted = ["午前", "午後", "夜間", "全時間帯"]
     else:
         wanted = ["夜間"]
 
     try:
-        # テーブルセル(tdタグ)をすべて取得
         cells = page.locator("td")
         count = cells.count()
 
@@ -79,17 +78,20 @@ def scan_current_page_for_matches(page, today: dt.date):
             try:
                 text = cells.nth(i).inner_text().strip()
 
-                # 「○」または「空き」が書かれているセルを検出
-                if text in ["○", "空き"]:
+                # 「○」「△」「空き」を検出対象にする
+                if text in ["○", "△", "空き"]:
                     # 同じ行(<tr>)を取得して時間帯情報を確認
                     row = cells.nth(i).locator("xpath=ancestor::tr[1]")
                     row_text = row.inner_text()
 
-                    # 該当行に「夜間」「午前」などの語が含まれているか
+                    # 該当行に対象時間帯語が含まれていればヒット
                     if any(w in row_text for w in wanted):
+                        # 行テキストから実際にヒットした時間帯だけを抽出（なければwantedを丸ごと）
+                        hit_slots = [w for w in wanted if w in row_text] or wanted
                         matches.append({
                             "date": "本日以降",
-                            "slot": ",".join([w for w in wanted if w in row_text]) or ",".join(wanted),
+                            "slot": ",".join(hit_slots),
+                            "mark": text,  # ○ / △ / 空き
                         })
 
             except Exception as inner_err:
@@ -118,7 +120,8 @@ def main():
                 navigate_to_subfacility(page, sub)
                 matches = scan_current_page_for_matches(page, today)
                 for m in matches:
-                    found.append((sub, m["date"], m["slot"], page.url))
+                    # 施設・時間帯・記号（○/△/空き）・URL をまとめる
+                    found.append((sub, m["date"], m["slot"], m["mark"], page.url))
             except Exception as e:
                 # 画面遷移失敗はログだけ出して継続
                 print(f"[WARN] {sub} failed: {e}")
@@ -127,8 +130,10 @@ def main():
 
     if found:
         lines = ["【朝霞市・総合体育館 空き検知】"]
-        for sub, date, slot, url in found:
-            lines.append(f"・{sub} / {date} / 対象帯: {slot}\n{url}")
+        for sub, date, slot, mark, url in found:
+            # △ の場合は注意アイコンを付けるなどの差別化も可能
+            prefix = "◎" if mark == "○" else ("⚠️" if mark == "△" else "✅")
+            lines.append(f"{prefix} {sub} / {date} / 対象帯: {slot} / 表示: {mark}\n{url}")
         send_line("\n".join(lines))
     else:
         # ← 常時通知モード：空きが無くても“稼働中”メッセージを送信
